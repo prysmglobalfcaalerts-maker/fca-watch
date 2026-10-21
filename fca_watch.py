@@ -101,7 +101,12 @@ An item may be a single publication or an email digest listing several
 publications. Flag each relevant publication separately.
 
 Reply with ONLY a JSON object, no other text:
-{"matches": [{"title": "...", "stage": "...", "why": "...", "link": "..."}]}
+{"matches": [{"title": "...", "type": "...", "stage": "...", "why": "...", "link": "..."}]}
+- type: either "New to FCA regulation" or "Change to an existing regime".
+  Use "New to FCA regulation" ONLY if the publication itself says the
+  activity, product or industry is not currently regulated by the FCA (or is
+  being taken out of regulation). If it amends, overhauls or refers to rules
+  that already apply, or if you are unsure, use "Change to an existing regime".
 - stage: one of "Early idea / discussion", "Consultation", "Final rules",
   "Legislation", "Coming into force"
 - why: one plain-English sentence saying what is changing and for whom
@@ -283,6 +288,7 @@ def format_digest(matches):
     for n, m in enumerate(matches, 1):
         lines += [
             f"{n}. {m.get('title', '(untitled)')}",
+            f"   Type:   {m.get('type', 'Change to an existing regime')}",
             f"   Stage:  {m.get('stage', 'unknown')}",
             f"   What:   {m.get('why', '')}",
             f"   Source: {m.get('source', '')}",
