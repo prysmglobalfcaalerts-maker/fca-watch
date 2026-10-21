@@ -101,7 +101,14 @@ An item may be a single publication or an email digest listing several
 publications. Flag each relevant publication separately.
 
 Reply with ONLY a JSON object, no other text:
-{"matches": [{"title": "...", "type": "...", "stage": "...", "why": "...", "link": "..."}]}
+{"matches": [{"headline": "...", "title": "...", "doc_type": "...", "type": "...", "stage": "...", "why": "...", "link": "..."}]}
+- headline: your own plain-English heading (max 12 words) saying what is
+  changing and for whom, e.g. "FCA to update rules on simplified investment
+  advice". It must make sense to someone who has not seen the publication.
+- title: the publication's original title, copied exactly.
+- doc_type: what kind of publication it is and, if given, who it is from,
+  e.g. "Speech by the FCA deputy chief executive", "FCA consultation paper",
+  "HM Treasury consultation", "Statutory instrument", "FCA policy statement".
 - type: either "New to FCA regulation" or "Change to an existing regime".
   Use "New to FCA regulation" ONLY if the publication itself says the
   activity, product or industry is not currently regulated by the FCA (or is
@@ -284,18 +291,18 @@ def send_email(subject, body):
 
 
 def format_digest(matches):
-    lines = []
-    for n, m in enumerate(matches, 1):
-        lines += [
-            f"{n}. {m.get('title', '(untitled)')}",
-            f"   Type:   {m.get('type', 'Change to an existing regime')}",
-            f"   Stage:  {m.get('stage', 'unknown')}",
-            f"   What:   {m.get('why', '')}",
-            f"   Source: {m.get('source', '')}",
-            f"   Link:   {m.get('link') or 'see source'}",
-            "",
-        ]
-    return "\n".join(lines)
+    blocks = []
+    for m in matches:
+        blocks.append("\n".join([
+            (m.get("headline") or m.get("title") or "(untitled)").upper(),
+            f"From:   {m.get('doc_type') or m.get('source', '')} – "
+            f"\u201c{m.get('title', '')}\u201d",
+            f"Type:   {m.get('type', 'Change to an existing regime')}",
+            f"Stage:  {m.get('stage', 'unknown')}",
+            f"What:   {m.get('why', '')}",
+            f"Link:   {m.get('link') or 'see source'}",
+        ]))
+    return ("\n\n" + "-" * 40 + "\n\n").join(blocks) + "\n"
 
 
 # --------------------------------------------------------------------------
