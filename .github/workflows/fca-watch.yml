@@ -1,0 +1,46 @@
+name: FCA regulatory watch
+
+on:
+  schedule:
+    - cron: "0 7 * * *"   # every day at 07:00 UTC (08:00 UK summer time)
+  workflow_dispatch:      # adds a "Run workflow" button for manual runs
+    inputs:
+      test_mode:
+        description: "Test: check the newest items and email the result (changes nothing)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write         # lets the bot save seen.json back to the repo
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the watcher
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BOT_EMAIL: ${{ secrets.BOT_EMAIL }}
+          BOT_EMAIL_PASSWORD: ${{ secrets.BOT_EMAIL_PASSWORD }}
+          NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+          TEST_MODE: ${{ inputs.test_mode }}
+        run: python fca_watch.py
+
+      - name: Save the list of items already checked
+        run: |
+          if [ -f seen.json ]; then
+            git config user.name "fca-watch-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add seen.json
+            git diff --cached --quiet || git commit -m "Update seen items"
+            git push
+          fi
