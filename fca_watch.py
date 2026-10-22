@@ -1,12 +1,13 @@
 """
-FCA regulatory change watcher.
+FCA and PRA regulatory change watcher.
 
 Once a day this script:
-  1. Collects new items from public feeds (FCA news, HM Treasury, new UK
-     statutory instruments) and, optionally, the FCA email alerts that arrive
-     in the bot's own inbox.
-  2. Asks Claude whether each item brings a new activity/industry into FCA
-     regulation, or materially changes how a sector is regulated.
+  1. Collects new items from public feeds (FCA news, Bank of England / PRA
+     publications, HM Treasury, new UK statutory instruments) and the FCA
+     email alerts that arrive in the bot's own inbox.
+  2. Asks Claude whether each item changes the scope of FCA or PRA
+     regulation, or materially changes how a sector is regulated (including
+     the capital and other prudential requirements on banks and insurers).
   3. Emails you a digest of only the items that matter.
 
 It remembers what it has already checked in seen.json, so you are never
@@ -60,6 +61,23 @@ FEEDS = [
         "url": "https://www.fca.org.uk/news/rss.xml",
     },
     {
+        # Everything the PRA publishes: consultation papers, policy
+        # statements, supervisory statements, statements of policy.
+        "name": "PRA publications",
+        "url": "https://www.bankofengland.co.uk/rss/prudential-regulation-publications",
+    },
+    {
+        # Bank of England news. Filtered so interest-rate and monetary policy
+        # news is never sent to Claude; only prudential/regulatory items are.
+        "name": "Bank of England news",
+        "url": "https://www.bankofengland.co.uk/rss/news",
+        "keywords": [
+            "prudential", "pra ", "capital", "liquidity", "solvency",
+            "leverage", "basel", "buffer", "resolution", "ring-fenc",
+            "insurer", "insurance", "regulat", "financial policy committee",
+        ],
+    },
+    {
         "name": "HM Treasury publications",
         "url": "https://www.gov.uk/search/all.atom?organisations%5B%5D=hm-treasury",
     },
@@ -76,26 +94,37 @@ FEEDS = [
 
 # What counts as relevant. Edit this text to tune what you get alerted about.
 SYSTEM_PROMPT = """You screen UK financial-services publications for one reader.
-The reader wants to know whenever the scope of FCA regulation changes, or the
-way a sector is regulated changes materially.
+The reader wants to know whenever the scope of regulation by the FCA or the
+Prudential Regulation Authority (PRA, part of the Bank of England) changes,
+or the way a sector is regulated changes materially.
 
 FLAG an item if it does any of these (including proposals, consultations,
 draft legislation, final rules, or commencement dates):
-- Brings a new activity, product, business type or industry into FCA
+- Brings a new activity, product, business type or industry into FCA or PRA
   regulation (e.g. changes to the Regulated Activities Order, new regimes like
-  those for funeral plans, buy-now-pay-later or cryptoassets).
-- Takes an activity or industry out of FCA regulation.
+  those for funeral plans, buy-now-pay-later or cryptoassets, or a new
+  prudential regime for a type of firm).
+- Takes an activity or industry out of FCA or PRA regulation.
 - Materially changes how an already-regulated sector is regulated: a new or
   overhauled rulebook, a new authorisation or registration regime, new
   conduct standards for a whole sector, or moving supervision between
   regulators.
-- Changes the FCA's own powers, remit, objectives or structure.
+- Materially changes the prudential rules for banks, building societies or
+  insurers: how much capital or liquidity they must hold, leverage, capital
+  buffers (including decisions by the Financial Policy Committee),
+  Basel 3.1, Solvency UK, ring-fencing, recovery and resolution, or which
+  firms the rules apply to (e.g. thresholds, the small domestic deposit
+  takers regime).
+- Changes the FCA's or PRA's own powers, remit, objectives or structure.
 
-DO NOT flag: enforcement action, fines, warnings about unauthorised firms or
-scams, speeches with no new proposal, fees and levies, statistics and data
-releases, appointments, routine or minor technical Handbook amendments
-(e.g. quarterly consultation tidy-ups), or tax and spending matters that do
-not affect financial regulation.
+DO NOT flag: interest rates, Bank Rate, Monetary Policy Committee decisions,
+inflation, banknotes, markets operations or other monetary policy; enforcement
+action, fines, warnings about unauthorised firms or scams; speeches with no
+new proposal; fees and levies; statistics and data releases; regulatory
+digests and newsletters that only summarise earlier publications;
+appointments; routine or minor technical amendments (e.g. FCA quarterly
+consultations, PRA Low Impact Amendments); or tax and spending matters that
+do not affect financial regulation.
 
 An item may be a single publication or an email digest listing several
 publications. Flag each relevant publication separately.
@@ -108,11 +137,13 @@ Reply with ONLY a JSON object, no other text:
 - title: the publication's original title, copied exactly.
 - doc_type: what kind of publication it is and, if given, who it is from,
   e.g. "Speech by the FCA deputy chief executive", "FCA consultation paper",
-  "HM Treasury consultation", "Statutory instrument", "FCA policy statement".
-- type: either "New to FCA regulation" or "Change to an existing regime".
-  Use "New to FCA regulation" ONLY if the publication itself says the
-  activity, product or industry is not currently regulated by the FCA (or is
-  being taken out of regulation). If it amends, overhauls or refers to rules
+  "PRA policy statement", "PRA supervisory statement", "Bank of England
+  Financial Policy Committee record", "HM Treasury consultation",
+  "Statutory instrument".
+- type: either "New to regulation" or "Change to an existing regime".
+  Use "New to regulation" ONLY if the publication itself says the activity,
+  product, industry or type of firm is not currently regulated by the FCA or
+  PRA (or is being taken out of regulation). If it amends, overhauls or refers to rules
   that already apply, or if you are unsure, use "Change to an existing regime".
 - stage: one of "Early idea / discussion", "Consultation", "Final rules",
   "Legislation", "Coming into force"
@@ -329,6 +360,20 @@ def main():
         new_items = [i for group in per_source.values() for i in group]
     else:
         new_items = [i for i in items if i["id"] not in seen]
+        # A source added since the bot started (e.g. the PRA feeds) is
+        # recorded silently the first time it appears, so you aren't sent
+        # alerts about everything that was already sitting in its feed.
+        known = {k.split("|", 1)[0] for k in seen}
+        if seen:
+            now = datetime.now(timezone.utc).isoformat()
+            fresh = [i for i in new_items
+                     if i["id"].split("|", 1)[0] not in known]
+            for item in fresh:
+                seen[item["id"]] = now
+            if fresh:
+                print(f"Recorded {len(fresh)} items from newly added sources "
+                      f"as a starting point")
+            new_items = [i for i in new_items if i not in fresh]
     print(f"{len(new_items)} items to check")
 
     if first_run and not TEST_MODE:
@@ -370,7 +415,7 @@ def main():
     save_seen(seen)
     if matches:
         send_email(
-            f"FCA regulatory change alert – {len(matches)} item(s) ({today})",
+            f"FCA/PRA regulatory change alert – {len(matches)} item(s) ({today})",
             format_digest(matches),
         )
     else:
