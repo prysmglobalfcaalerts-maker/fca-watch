@@ -8,7 +8,8 @@ Once a day this script:
   2. Asks Claude whether each item changes the scope of FCA or PRA
      regulation, or materially changes how a sector is regulated (including
      the capital and other prudential requirements on banks and insurers).
-  3. Emails you a digest of only the items that matter.
+  3. Emails you a digest of the items that matter, or, if none qualify,
+     a short "no changes today" email (see SEND_NO_CHANGE_EMAIL).
 
 It remembers what it has already checked in seen.json, so you are never
 alerted twice about the same thing.
@@ -52,6 +53,10 @@ MAX_SEEN = 5000  # oldest entries are dropped beyond this
 MODEL = os.environ.get("MODEL") or "claude-haiku-5-5"
 TEST_MODE = os.environ.get("TEST_MODE", "").lower() in ("1", "true", "yes")
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
+
+# Send a short "no changes today" email on days when nothing qualifies.
+# Set to False to only hear from the bot when something is flagged.
+SEND_NO_CHANGE_EMAIL = True
 
 # Public feeds to watch. "keywords" (optional) pre-filters busy feeds so only
 # plausibly relevant items are sent to Claude, which keeps costs tiny.
@@ -417,6 +422,19 @@ def main():
         send_email(
             f"FCA/PRA regulatory change alert – {len(matches)} item(s) ({today})",
             format_digest(matches),
+        )
+    elif SEND_NO_CHANGE_EMAIL:
+        checked = (f"The bot checked {len(new_items)} new publication(s) since "
+                   f"its last run and none of them qualified."
+                   if new_items else
+                   "There were no new publications since its last run.")
+        send_email(
+            f"FCA/PRA regulatory watch – no changes today ({today})",
+            f"No changes found today.\n\n"
+            f"There are no new areas being brought into regulation and no "
+            f"material changes to existing regimes from the FCA, the Bank of "
+            f"England / PRA, HM Treasury or new UK legislation.\n\n"
+            f"{checked}\n",
         )
     else:
         print("Nothing relevant today; no email sent.")
