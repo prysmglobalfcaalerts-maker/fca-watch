@@ -8,7 +8,8 @@ instructions and email:
      changes to how a sector is regulated (including the capital and other
      prudential requirements on banks and insurers).
 
-  2. Just watch – parliamentary activity (Hansard, bills), government and
+  2. Just watch – parliamentary activity (Hansard debates, written questions
+     and statements, select committees, bills), government and
      regulator publications, and trade association positions on the pensions
      and life insurance sector, as they affect Just Group plc (formerly Just
      Retirement).
@@ -52,7 +53,7 @@ from email.header import decode_header, make_header
 from email.message import EmailMessage
 from html import unescape
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import anthropic
 import feedparser
@@ -138,14 +139,38 @@ SOURCES = [
     },
 
     # ---- Added for the Just watch -------------------------------------------
+    # Parliament, read directly from Parliament's own data services. The
+    # search terms are in PARLIAMENT_KEYWORDS below.
     {
-        # Debates, written questions and answers, statements and committee
-        # mentions in the Commons and Lords, via TheyWorkForYou keyword alerts
-        # sent to the bot's inbox (TheyWorkForYou is built on Hansard).
-        "name": "Hansard (TheyWorkForYou alert)",
-        "kind": "email",
-        "from": "theyworkforyou",
-        "id_group": "email-twfy",
+        # Commons, Lords and Westminster Hall debates, including oral
+        # questions and urgent questions (one item per debate).
+        "name": "Hansard debates",
+        "kind": "hansard",
+        "days_back": 7,
+    },
+    {
+        # Written questions when tabled, and again when answered.
+        "name": "Written questions",
+        "kind": "written_questions",
+        "days_back": 7,
+    },
+    {
+        "name": "Written ministerial statements",
+        "kind": "written_statements",
+        "days_back": 7,
+    },
+    {
+        # New inquiries, calls for evidence, reports, government responses
+        # and oral evidence sessions of these select committees.
+        "name": "Select committees",
+        "kind": "committees",
+        "committees": [
+            "Work and Pensions Committee",
+            "Treasury Committee",
+            "Financial Services Regulation Committee",
+            "Economic Affairs Committee",
+        ],
+        "days_back": 14,
     },
     {
         # New public bills and bills that have moved to a new stage.
@@ -196,6 +221,33 @@ SOURCES = [
     },
 ]
 
+# Search terms for Hansard, written questions and written statements.
+# Each term is searched separately; keep them specific, because a broad word
+# like "pension" would match hundreds of mentions a week.
+PARLIAMENT_KEYWORDS = [
+    "Just Group", "Just Retirement",
+    "annuity", "annuities", "bulk annuity", "pension risk transfer",
+    "equity release", "lifetime mortgage",
+    "Solvency UK", "matching adjustment", "funded reinsurance",
+    "life insurance", "insurers", "Prudential Regulation Authority",
+    "defined benefit", "superfund", "pension surplus",
+    "Pension Schemes Act", "Pensions Regulator", "Pension Protection Fund",
+    "Pensions Commission", "automatic enrolment", "retirement income",
+    "targeted support", "long-term care",
+]
+
+# Select committee publication types to skip (individual evidence
+# submissions and housekeeping papers; reports, responses, calls for
+# evidence and oral evidence sessions are kept).
+SKIP_COMMITTEE_TYPES = ("written evidence", "formal minutes", "minutes")
+
+HANSARD_API = "https://hansard-api.parliament.uk"
+QUESTIONS_APIS = [  # tried in order
+    "https://questions-statements-api.parliament.uk",
+    "https://writtenquestions-api.parliament.uk",
+]
+COMMITTEES_API = "https://committees-api.parliament.uk"
+
 # --------------------------------------------------------------------------
 # Screening instructions. Edit these to tune what each watch flags.
 # --------------------------------------------------------------------------
@@ -215,7 +267,8 @@ Reply with ONLY a JSON object, no other text:
   "FCA consultation paper", "PRA policy statement", "HM Treasury
   consultation", "Statutory instrument", "House of Commons debate",
   "House of Lords written answer", "Westminster Hall debate", "Public bill
-  (Commons report stage)", "DWP consultation", "TPR press release",
+  (Commons report stage)", "Work and Pensions Committee report", "Treasury
+  Committee call for evidence", "DWP consultation", "TPR press release",
   "Pensions UK press release", "ABI response", "Equity Release Council
   statement".
 - stage: one of "Early idea / discussion", "Consultation", "Final rules",
@@ -300,8 +353,9 @@ statutory instruments or commencement dates):
 - Reports a trade association (e.g. Pensions UK, ABI, Equity Release
   Council) setting out a position on, responding to, or calling for one of
   the changes above.
-- Announces a parliamentary committee inquiry or report on any of the
-  topics above.
+- Is select committee work on any of the topics above: a new inquiry, call
+  for evidence, report, government response, or an oral evidence session
+  with ministers, regulators or industry.
 
 DO NOT flag: monetary policy and interest rates; market statistics and
 sales data; member news, events, awards, conferences and appointments;
@@ -357,7 +411,8 @@ WATCHES = [
         "none_body": (
             "No relevant parliamentary activity, regulatory changes or trade "
             "association positions affecting the pensions and life insurance "
-            "sector were found today across Hansard, Parliament bills, the "
+            "sector were found today across Hansard, written questions and "
+            "statements, select committees, Parliament bills, the "
             "FCA, the Bank of England / PRA, HM Treasury, DWP, the Pensions "
             "Regulator, Pensions UK, the ABI, the Equity Release Council or "
             "new UK legislation."
@@ -380,15 +435,40 @@ def clean(text, limit):
     return text[:limit]
 
 
-def http_get(url):
+def http_get(url, accept="text/html,application/xhtml+xml,*/*;q=0.8"):
     req = urllib.request.Request(url, headers={
         "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept": accept,
         "Accept-Language": "en-GB,en;q=0.9",
     })
     with urllib.request.urlopen(req, timeout=30) as resp:
         charset = resp.headers.get_content_charset() or "utf-8"
         return resp.read().decode(charset, "replace")
+
+
+def http_json(url):
+    return json.loads(http_get(url, accept="application/json"))
+
+
+def pick(obj, *names, default=None):
+    """Case-insensitive field lookup that tolerates small naming differences
+    in Parliament's data (e.g. "Results" vs "results")."""
+    if not isinstance(obj, dict):
+        return default
+    lowered = {k.lower(): v for k, v in obj.items()}
+    for name in names:
+        value = lowered.get(name.lower())
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def result_list(data, *names):
+    """The list of records in an API response."""
+    if isinstance(data, list):
+        return data
+    value = pick(data, *names)
+    return value if isinstance(value, list) else []
 
 
 def group_of(item_id):
@@ -518,6 +598,276 @@ def fetch_article_text(url, title, limit=5000):
     return text[start:start + limit] if start >= 0 else text[:limit]
 
 
+# ---- Parliament -------------------------------------------------------------
+
+def since_date(days):
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def run_queries(source, queries):
+    """Run (label, function) pairs, tolerating individual failures. Reports
+    the source as unreadable only if every query fails."""
+    results, failures = [], []
+    for label, func in queries:
+        try:
+            results.append((label, func()))
+        except Exception as exc:
+            failures.append(f"{label}: {exc}")
+        time.sleep(0.2)  # be polite to Parliament's servers
+    if failures:
+        print(f"WARNING: {source['name']}: {len(failures)} of {len(queries)} "
+              f"searches failed, e.g. {failures[0]}")
+    if queries and len(failures) == len(queries):
+        SOURCE_PROBLEMS[source["name"]] = "Parliament's data service could not be reached"
+    return results
+
+
+def pascal_slug(title):
+    return "".join(w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", title or ""))
+
+
+def fetch_hansard_items(source):
+    """Debates mentioning any keyword, one item per debate."""
+    start = since_date(source["days_back"])
+
+    def query(term):
+        q = f'"{term}"' if " " in term else term
+        url = (f"{HANSARD_API}/search/contributions/Spoken.json"
+               f"?queryParameters.searchTerm={quote(q)}"
+               f"&queryParameters.startDate={start}"
+               f"&queryParameters.take=50")
+        return result_list(http_json(url), "Results", "items")
+
+    debates = {}
+    for term, rows in run_queries(source, [(t, lambda t=t: query(t))
+                                           for t in PARLIAMENT_KEYWORDS]):
+        for row in rows:
+            ext_id = pick(row, "DebateSectionExtId", "DebateSectionId")
+            if not ext_id:
+                continue
+            title = clean(pick(row, "DebateSection", "Title", default=""), 300)
+            house = pick(row, "House", default="Commons")
+            date = str(pick(row, "SittingDate", default=""))[:10]
+            section = clean(pick(row, "Section", "HansardSection", default=""), 100)
+            member = clean(pick(row, "MemberName", "AttributedTo", default=""), 150)
+            text = clean(pick(row, "ContributionTextFull", "ContributionText",
+                              default=""), 1500)
+            d = debates.setdefault(ext_id, {
+                "title": title, "house": house, "date": date,
+                "section": section, "terms": set(), "speeches": [],
+            })
+            d["terms"].add(term)
+            snippet = f"{member}: {text}" if member else text
+            if snippet and snippet not in d["speeches"]:
+                d["speeches"].append(snippet)
+
+    items = []
+    for ext_id, d in sorted(debates.items(), key=lambda kv: kv[1]["date"],
+                            reverse=True):
+        link = (f"https://hansard.parliament.uk/{d['house']}/{d['date']}/"
+                f"debates/{ext_id}/{pascal_slug(d['title'])}")
+        text = (f"House: {d['house']}. Section: {d['section']}. "
+                f"Date: {d['date']}. Matched terms: {', '.join(sorted(d['terms']))}.\n"
+                "Relevant contributions:\n" + "\n".join(d["speeches"]))[:8000]
+        items.append({
+            "id": f"{source['name']}|{ext_id}",
+            "source": source["name"],
+            "title": f"{d['title']} ({d['house']}, {d['date']})",
+            "link": link,
+            "text": text,
+        })
+    print(f"{source['name']}: {len(items)} items")
+    return items
+
+
+def questions_api(path):
+    """Call the written questions/statements service, trying each host."""
+    last_exc = None
+    for host in QUESTIONS_APIS:
+        try:
+            return http_json(host + path)
+        except Exception as exc:
+            last_exc = exc
+    raise last_exc
+
+
+def fetch_written_question_items(source):
+    start = since_date(source["days_back"])
+    queries = []
+    for term in PARLIAMENT_KEYWORDS:
+        for date_field in ("tabledWhenFrom", "answeredWhenFrom"):
+            path = (f"/api/writtenquestions/questions?searchTerm={quote(term)}"
+                    f"&{date_field}={start}&expandMember=true&take=50")
+            queries.append((f"{term} ({date_field})",
+                            lambda p=path: questions_api(p)))
+
+    found = {}
+    for label, data in run_queries(source, queries):
+        for row in result_list(data, "results", "items"):
+            q = pick(row, "value", default=row)
+            qid, uin = pick(q, "id"), pick(q, "uin", default="")
+            if not qid:
+                continue
+            answered = bool(pick(q, "dateAnswered") or pick(q, "answerText"))
+            key = f"{qid}-{'answered' if answered else 'tabled'}"
+            tabled = str(pick(q, "dateTabled", default=""))[:10]
+            asker = pick(pick(q, "askingMember", default={}), "name",
+                         default="") or pick(q, "askingMemberName", default="")
+            body = pick(q, "answeringBodyName", default="")
+            house = pick(q, "house", default="")
+            heading = clean(pick(q, "heading", default=""), 200)
+            text = (f"{house} written question {uin} tabled {tabled} by {asker} "
+                    f"to {body}.\nQuestion: {clean(pick(q, 'questionText', default=''), 2000)}")
+            if answered:
+                text += f"\nAnswer: {clean(pick(q, 'answerText', default=''), 4000)}"
+            found[key] = {
+                "id": f"{source['name']}|{key}",
+                "source": source["name"],
+                "title": (f"{'Answered' if answered else 'Tabled'}: {heading or 'Written question'}"
+                          f" ({house}, {body})"),
+                "link": ("https://questions-statements.parliament.uk/written-questions/"
+                         f"detail/{tabled}/{uin}" if tabled and uin else ""),
+                "text": text,
+                "date": tabled,
+            }
+    items = sorted(found.values(), key=lambda i: i["date"], reverse=True)
+    print(f"{source['name']}: {len(items)} items")
+    return items
+
+
+def fetch_written_statement_items(source):
+    start = since_date(source["days_back"])
+    queries = [(term, lambda t=term: questions_api(
+                    f"/api/writtenstatements/statements?searchTerm={quote(t)}"
+                    f"&madeWhenFrom={start}&expandMember=true&take=50"))
+               for term in PARLIAMENT_KEYWORDS]
+    found = {}
+    for label, data in run_queries(source, queries):
+        for row in result_list(data, "results", "items"):
+            s = pick(row, "value", default=row)
+            sid, uin = pick(s, "id"), pick(s, "uin", default="")
+            if not sid:
+                continue
+            made = str(pick(s, "dateMade", default=""))[:10]
+            title = clean(pick(s, "title", default="Written statement"), 300)
+            body = pick(s, "answeringBodyName", default="")
+            house = pick(s, "house", default="")
+            found[sid] = {
+                "id": f"{source['name']}|{sid}",
+                "source": source["name"],
+                "title": f"{title} ({house}, {body}, {made})",
+                "link": ("https://questions-statements.parliament.uk/written-statements/"
+                         f"detail/{made}/{uin}" if made and uin else ""),
+                "text": clean(pick(s, "text", default=""), 6000),
+                "date": made,
+            }
+    items = sorted(found.values(), key=lambda i: i["date"], reverse=True)
+    print(f"{source['name']}: {len(items)} items")
+    return items
+
+
+def find_url(obj):
+    """First web address found anywhere inside a record."""
+    if isinstance(obj, str):
+        return obj if obj.startswith("http") else ""
+    if isinstance(obj, dict):
+        obj = list(obj.values())
+    if isinstance(obj, list):
+        for value in obj:
+            url = find_url(value)
+            if url:
+                return url
+    return ""
+
+
+def fetch_committee_items(source):
+    start = since_date(source["days_back"])
+    items, failures = [], []
+    for name in source["committees"]:
+        try:
+            data = http_json(f"{COMMITTEES_API}/api/Committees?SearchTerm={quote(name)}"
+                             f"&CommitteeStatus=Current&Take=20")
+            matches = result_list(data, "items", "results")
+            exact = [c for c in matches
+                     if str(pick(c, "name", default="")).lower() == name.lower()]
+            committee = (exact or matches or [None])[0]
+            if not committee:
+                raise ValueError("committee not found")
+            cid = pick(committee, "id")
+            cname = pick(committee, "name", default=name)
+            house = pick(committee, "house", default="")
+
+            # New inquiries and other committee work.
+            data = http_json(f"{COMMITTEES_API}/api/CommitteeBusiness?CommitteeId={cid}"
+                             f"&DateFrom={start}&SortOrder=DateOpenedNewest&Take=30")
+            for b in result_list(data, "items", "results"):
+                bid = pick(b, "id")
+                if not bid:
+                    continue
+                kind = pick(pick(b, "type", default={}), "name", default="Inquiry")
+                items.append({
+                    "id": f"{source['name']}|business-{bid}",
+                    "source": source["name"],
+                    "title": f"{cname}: new {kind.lower()} – {clean(pick(b, 'title', default=''), 250)}",
+                    "link": f"https://committees.parliament.uk/work/{bid}/",
+                    "text": (f"{house} {cname} opened a new {kind.lower()}: "
+                             f"{clean(pick(b, 'title', default=''), 300)}. Opened "
+                             f"{str(pick(b, 'openDate', default=''))[:10]}. "
+                             f"{clean(pick(b, 'description', 'summary', default=''), 3000)}"),
+                    "date": str(pick(b, "openDate", default=""))[:10],
+                })
+
+            # Reports, government responses, calls for evidence, oral evidence.
+            data = http_json(f"{COMMITTEES_API}/api/Publications?CommitteeId={cid}"
+                             f"&StartDate={start}&SortOrder=PublicationDateDescending&Take=50")
+            for p in result_list(data, "items", "results"):
+                pid = pick(p, "id")
+                ptype = pick(pick(p, "type", default={}), "name", default="Publication")
+                if not pid or ptype.lower().startswith(SKIP_COMMITTEE_TYPES):
+                    continue
+                inquiries = ", ".join(clean(pick(b, "title", default=""), 200)
+                                      for b in pick(p, "businesses", default=[]) or [])
+                business_ids = [pick(b, "id") for b in pick(p, "businesses", default=[]) or []]
+                desc = clean(pick(p, "description", "title", default=""), 300)
+                date = str(pick(p, "publicationStartDate", "date", default=""))[:10]
+                link = (find_url(p)
+                        or (f"https://committees.parliament.uk/work/{business_ids[0]}/"
+                            if business_ids and business_ids[0] else "")
+                        or "https://committees.parliament.uk/publications/")
+                items.append({
+                    "id": f"{source['name']}|publication-{pid}",
+                    "source": source["name"],
+                    "title": f"{cname}: {ptype} – {desc}",
+                    "link": link,
+                    "text": (f"{house} {cname} published a {ptype} on {date}: {desc}. "
+                             f"Inquiry: {inquiries or 'n/a'}."),
+                    "date": date,
+                })
+        except Exception as exc:
+            failures.append(f"{name}: {exc}")
+        time.sleep(0.2)
+
+    if failures:
+        print(f"WARNING: {source['name']}: {'; '.join(failures)}")
+    if len(failures) == len(source["committees"]):
+        SOURCE_PROBLEMS[source["name"]] = "Parliament's committees service could not be reached"
+    # Joint publications can appear under more than one committee.
+    items = list({i["id"]: i for i in items}.values())
+    items.sort(key=lambda i: i["date"], reverse=True)
+    print(f"{source['name']}: {len(items)} items")
+    return items
+
+
+PARLIAMENT_FETCHERS = {
+    "hansard": fetch_hansard_items,
+    "written_questions": fetch_written_question_items,
+    "written_statements": fetch_written_statement_items,
+    "committees": fetch_committee_items,
+}
+
+
+# ---- Email ------------------------------------------------------------------
+
 def email_body_text(msg, limit):
     plain, html = "", ""
     for part in msg.walk():
@@ -586,6 +936,8 @@ def collect_items():
                 items += fetch_feed_items(source)
             elif source["kind"] == "page":
                 items += fetch_page_items(source)
+            elif source["kind"] in PARLIAMENT_FETCHERS:
+                items += PARLIAMENT_FETCHERS[source["kind"]](source)
         except Exception as exc:
             print(f"WARNING: {source['name']} failed: {exc}")
             SOURCE_PROBLEMS[source["name"]] = "could not be read"
