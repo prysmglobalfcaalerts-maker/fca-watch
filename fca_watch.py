@@ -417,8 +417,8 @@ WATCHES = [
         "sources": None,  # None = every source above
         "prompt": JUST_PROMPT,
         "notify_env": ["NOTIFY_TO_JUST", "NOTIFY_TO"],
-        "alert_subject": "Just – pensions & insurance alert",
-        "none_subject": "Just – pensions & insurance watch – no changes today",
+        "alert_subject": "Just Retirement UK Pensions + Insurance Regulatory Bot",
+        "none_subject": "Just Retirement UK Pensions + Insurance Regulatory Bot – no changes today",
         "none_body": (
             "No relevant parliamentary activity, regulatory changes or trade "
             "association positions affecting the pensions and life insurance "
