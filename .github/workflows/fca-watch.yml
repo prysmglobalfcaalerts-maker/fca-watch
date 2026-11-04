@@ -32,6 +32,8 @@ jobs:
           BOT_EMAIL: ${{ secrets.BOT_EMAIL }}
           BOT_EMAIL_PASSWORD: ${{ secrets.BOT_EMAIL_PASSWORD }}
           NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+          NOTIFY_TO_JUST: ${{ secrets.NOTIFY_TO_JUST }}
+          TEST_NOTIFY_TO: ${{ secrets.TEST_NOTIFY_TO }}
           TEST_MODE: ${{ inputs.test_mode }}
         run: python fca_watch.py
 
