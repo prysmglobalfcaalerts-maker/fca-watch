@@ -46,7 +46,9 @@ import json
 import os
 import re
 import smtplib
+import socket
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
@@ -61,6 +63,15 @@ import feedparser
 # --------------------------------------------------------------------------
 # Settings
 # --------------------------------------------------------------------------
+
+# No network request (feeds, web pages, Parliament, email) may hang for more
+# than this many seconds.
+REQUEST_TIMEOUT = 20
+socket.setdefaulttimeout(REQUEST_TIMEOUT)
+
+# If this many Parliament searches in a row fail, skip the rest of that source
+# for today instead of waiting on each one.
+MAX_CONSECUTIVE_FAILURES = 3
 
 SEEN_FILE = Path(__file__).with_name("seen.json")
 MAX_SEEN = 20000  # oldest entries are dropped beyond this
@@ -441,7 +452,7 @@ def http_get(url, accept="text/html,application/xhtml+xml,*/*;q=0.8"):
         "Accept": accept,
         "Accept-Language": "en-GB,en;q=0.9",
     })
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
         charset = resp.headers.get_content_charset() or "utf-8"
         return resp.read().decode(charset, "replace")
 
@@ -607,17 +618,23 @@ def since_date(days):
 def run_queries(source, queries):
     """Run (label, function) pairs, tolerating individual failures. Reports
     the source as unreadable only if every query fails."""
-    results, failures = [], []
+    results, failures, in_a_row = [], [], 0
     for label, func in queries:
         try:
             results.append((label, func()))
+            in_a_row = 0
         except Exception as exc:
             failures.append(f"{label}: {exc}")
+            in_a_row += 1
+            if in_a_row >= MAX_CONSECUTIVE_FAILURES:
+                print(f"WARNING: {source['name']}: {in_a_row} searches in a row "
+                      f"failed, skipping the rest today. Last error: {exc}")
+                break
         time.sleep(0.2)  # be polite to Parliament's servers
     if failures:
-        print(f"WARNING: {source['name']}: {len(failures)} of {len(queries)} "
-              f"searches failed, e.g. {failures[0]}")
-    if queries and len(failures) == len(queries):
+        print(f"WARNING: {source['name']}: {len(failures)} searches failed, "
+              f"e.g. {failures[0]}")
+    if queries and not results:
         SOURCE_PROBLEMS[source["name"]] = "Parliament's data service could not be reached"
     return results
 
@@ -680,15 +697,24 @@ def fetch_hansard_items(source):
     return items
 
 
+_DEAD_HOSTS = set()
+
+
 def questions_api(path):
-    """Call the written questions/statements service, trying each host."""
+    """Call the written questions/statements service, trying each host and
+    not retrying a host that has already failed to connect this run."""
     last_exc = None
     for host in QUESTIONS_APIS:
+        if host in _DEAD_HOSTS:
+            continue
         try:
             return http_json(host + path)
+        except urllib.error.HTTPError as exc:
+            last_exc = exc  # host is up but rejected this request
         except Exception as exc:
+            _DEAD_HOSTS.add(host)
             last_exc = exc
-    raise last_exc
+    raise last_exc or OSError("no written questions service reachable")
 
 
 def fetch_written_question_items(source):
@@ -845,11 +871,13 @@ def fetch_committee_items(source):
                 })
         except Exception as exc:
             failures.append(f"{name}: {exc}")
+            if not isinstance(exc, (urllib.error.HTTPError, ValueError)):
+                break  # service unreachable; don't wait on each committee
         time.sleep(0.2)
 
     if failures:
         print(f"WARNING: {source['name']}: {'; '.join(failures)}")
-    if len(failures) == len(source["committees"]):
+    if failures and not items:
         SOURCE_PROBLEMS[source["name"]] = "Parliament's committees service could not be reached"
     # Joint publications can appear under more than one committee.
     items = list({i["id"]: i for i in items}.values())
@@ -1106,7 +1134,7 @@ def main():
             except Exception as exc:
                 print(f"WARNING: could not open {item['link']}: {exc}")
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(timeout=90, max_retries=2)
     for watch in WATCHES:
         matches = []
         checked = to_check[watch["key"]]
