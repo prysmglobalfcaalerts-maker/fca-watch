@@ -31,6 +31,8 @@ Settings come from environment variables (GitHub Actions secrets):
   BOT_EMAIL_PASSWORD  - a Gmail *app password* for that address (required)
   NOTIFY_TO           - where FCA/PRA alerts are sent (defaults to BOT_EMAIL)
   NOTIFY_TO_JUST      - where Just alerts are sent (defaults to NOTIFY_TO)
+  TEST_NOTIFY_TO      - where test-run emails are sent (defaults to the
+                        normal recipients)
   MODEL               - Claude model to use (defaults to claude-haiku-5-5)
   TEST_MODE           - "true" to check the newest items, email the result
                         and change nothing (for trying it out)
@@ -635,6 +637,9 @@ def classify(client, item, prompt):
 # --------------------------------------------------------------------------
 
 def recipients(watch):
+    # Test runs go only to TEST_NOTIFY_TO, if it is set.
+    if TEST_MODE and os.environ.get("TEST_NOTIFY_TO"):
+        return os.environ["TEST_NOTIFY_TO"]
     for var in watch["notify_env"]:
         if os.environ.get(var):
             return os.environ[var]
