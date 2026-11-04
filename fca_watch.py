@@ -69,9 +69,16 @@ import feedparser
 REQUEST_TIMEOUT = 20
 socket.setdefaulttimeout(REQUEST_TIMEOUT)
 
+# Parliament's services are often slow, so they get longer (and one retry).
+PARLIAMENT_TIMEOUT = 60
+
+# Most time (in seconds) any one Parliament source may take. If Parliament
+# is very slow, the bot keeps what it has found and moves on.
+PARLIAMENT_TIME_BUDGET = 300
+
 # If this many Parliament searches in a row fail, skip the rest of that source
 # for today instead of waiting on each one.
-MAX_CONSECUTIVE_FAILURES = 3
+MAX_CONSECUTIVE_FAILURES = 4
 
 SEEN_FILE = Path(__file__).with_name("seen.json")
 MAX_SEEN = 20000  # oldest entries are dropped beyond this
@@ -163,7 +170,7 @@ SOURCES = [
         # Written questions when tabled, and again when answered.
         "name": "Written questions",
         "kind": "written_questions",
-        "days_back": 7,
+        "days_back": 4,  # covers a weekend; every question is downloaded
     },
     {
         "name": "Written ministerial statements",
@@ -192,7 +199,8 @@ SOURCES = [
     {
         "name": "DWP publications",
         "kind": "feed",
-        "url": "https://www.gov.uk/search/all.atom?organisations%5B%5D=department-for-work-pensions",
+        "url": ("https://www.gov.uk/search/all.atom?keywords=pension"
+                "&organisations%5B%5D=department-for-work-pensions&order=updated-newest"),
         "keywords": [
             "pension", "annuit", "retirement", "defined benefit", "superfund",
             "surplus", "trustee", "auto-enrol", "automatic enrolment",
@@ -216,13 +224,13 @@ SOURCES = [
         "link_pattern": r"pensionsuk\.org\.uk/News/Article/[^/?#]+$",
     },
     {
+        # The ABI's website blocks automated visitors, so the bot reads ABI
+        # emails (news, press releases, consultation responses) sent to its
+        # inbox instead.
         "name": "Association of British Insurers",
-        "kind": "page",
-        "pages": [
-            "https://www.abi.org.uk/news/news-articles/",
-            "https://www.abi.org.uk/news/",
-        ],
-        "link_pattern": r"abi\.org\.uk/news/news-articles/\d{4}/\d{1,2}/[A-Za-z0-9-]+/?$",
+        "kind": "email",
+        "from": "abi.org.uk",
+        "id_group": "email-abi",
     },
     {
         "name": "Equity Release Council",
@@ -446,19 +454,33 @@ def clean(text, limit):
     return text[:limit]
 
 
-def http_get(url, accept="text/html,application/xhtml+xml,*/*;q=0.8"):
+def http_get(url, accept="text/html,application/xhtml+xml,*/*;q=0.8",
+             timeout=REQUEST_TIMEOUT):
     req = urllib.request.Request(url, headers={
         "User-Agent": USER_AGENT,
         "Accept": accept,
         "Accept-Language": "en-GB,en;q=0.9",
     })
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         charset = resp.headers.get_content_charset() or "utf-8"
         return resp.read().decode(charset, "replace")
 
 
-def http_json(url):
-    return json.loads(http_get(url, accept="application/json"))
+def http_json(url, timeout=REQUEST_TIMEOUT):
+    return json.loads(http_get(url, accept="application/json", timeout=timeout))
+
+
+def parliament_json(url):
+    """Parliament's services can be slow, so allow longer and retry once."""
+    try:
+        return http_json(url, timeout=PARLIAMENT_TIMEOUT)
+    except urllib.error.HTTPError as exc:
+        if exc.code < 500:
+            raise  # a bad request won't succeed on a retry
+    except Exception:
+        pass
+    time.sleep(3)
+    return http_json(url, timeout=PARLIAMENT_TIMEOUT)
 
 
 def pick(obj, *names, default=None):
@@ -619,7 +641,12 @@ def run_queries(source, queries):
     """Run (label, function) pairs, tolerating individual failures. Reports
     the source as unreadable only if every query fails."""
     results, failures, in_a_row = [], [], 0
-    for label, func in queries:
+    started = time.monotonic()
+    for n, (label, func) in enumerate(queries):
+        if time.monotonic() - started > PARLIAMENT_TIME_BUDGET:
+            print(f"WARNING: {source['name']}: Parliament is responding slowly; "
+                  f"stopped after {n} of {len(queries)} searches to stay on time")
+            break
         try:
             results.append((label, func()))
             in_a_row = 0
@@ -653,7 +680,7 @@ def fetch_hansard_items(source):
                f"?queryParameters.searchTerm={quote(q)}"
                f"&queryParameters.startDate={start}"
                f"&queryParameters.take=50")
-        return result_list(http_json(url), "Results", "items")
+        return result_list(parliament_json(url), "Results", "items")
 
     debates = {}
     for term, rows in run_queries(source, [(t, lambda t=t: query(t))
@@ -700,37 +727,93 @@ def fetch_hansard_items(source):
 _DEAD_HOSTS = set()
 
 
+def is_unreachable(exc):
+    """True if a host can't be reached at all (as opposed to being slow or
+    rejecting one request)."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return False
+    if isinstance(exc, urllib.error.URLError):
+        return not isinstance(exc.reason, (socket.timeout, TimeoutError))
+    return False
+
+
 def questions_api(path):
-    """Call the written questions/statements service, trying each host and
-    not retrying a host that has already failed to connect this run."""
+    """Call the written questions/statements service, trying each host. A
+    host is only skipped for the rest of the run if it can't be reached at
+    all, not merely because it was slow."""
     last_exc = None
     for host in QUESTIONS_APIS:
         if host in _DEAD_HOSTS:
             continue
         try:
-            return http_json(host + path)
-        except urllib.error.HTTPError as exc:
-            last_exc = exc  # host is up but rejected this request
+            return parliament_json(host + path)
         except Exception as exc:
-            _DEAD_HOSTS.add(host)
+            if is_unreachable(exc):
+                _DEAD_HOSTS.add(host)
             last_exc = exc
     raise last_exc or OSError("no written questions service reachable")
 
 
+def keyword_stem(term):
+    """Match singular and plural forms, e.g. annuity/annuities,
+    insurer/insurers, lifetime mortgage/mortgages."""
+    term = term.lower()
+    if term.endswith("ies"):
+        return term[:-3]
+    if term.endswith("y"):
+        return term[:-1]
+    return term.rstrip("s")
+
+
+def mentions_keyword(*texts):
+    haystack = " ".join(clean(t, 100000) for t in texts if t).lower()
+    return [k for k in PARLIAMENT_KEYWORDS if keyword_stem(k) in haystack]
+
+
+def fetch_all_pages(source, base_path, page_size=100, max_pages=40):
+    """Fetch every record from a written questions/statements listing, page
+    by page. Searching by keyword on Parliament's side is very slow, so the
+    bot downloads the recent records and checks the keywords itself."""
+    rows, skip, ids = [], 0, set()
+    started = time.monotonic()
+    for _ in range(max_pages):
+        if time.monotonic() - started > PARLIAMENT_TIME_BUDGET:
+            print(f"WARNING: {source['name']}: Parliament is responding slowly; "
+                  f"keeping the {len(rows)} records downloaded so far")
+            break
+        data = questions_api(f"{base_path}&take={page_size}&skip={skip}")
+        page = result_list(data, "results", "items")
+        page_ids = {str(pick(pick(r, "value", default=r), "id")) for r in page}
+        if not page or page_ids <= ids:
+            break  # no more records (or the same page came back again)
+        ids |= page_ids
+        rows += page
+        total = pick(data, "totalResults", default=None)
+        skip += len(page)
+        if isinstance(total, int) and skip >= total:
+            break
+        time.sleep(0.2)
+    return rows
+
+
 def fetch_written_question_items(source):
     start = since_date(source["days_back"])
-    queries = []
-    for term in PARLIAMENT_KEYWORDS:
-        for date_field in ("tabledWhenFrom", "answeredWhenFrom"):
-            path = (f"/api/writtenquestions/questions?searchTerm={quote(term)}"
-                    f"&{date_field}={start}&expandMember=true&take=50")
-            queries.append((f"{term} ({date_field})",
-                            lambda p=path: questions_api(p)))
-
-    found = {}
-    for label, data in run_queries(source, queries):
-        for row in result_list(data, "results", "items"):
+    queries = [
+        (label, lambda p=path: fetch_all_pages(source, p))
+        for label, path in (
+            ("tabled", f"/api/writtenquestions/questions?tabledWhenFrom={start}&expandMember=true"),
+            ("answered", f"/api/writtenquestions/questions?answeredWhenFrom={start}&expandMember=true"),
+        )
+    ]
+    found, scanned = {}, 0
+    for label, rows in run_queries(source, queries):
+        scanned += len(rows)
+        for row in rows:
             q = pick(row, "value", default=row)
+            if not mentions_keyword(pick(q, "heading", default=""),
+                                    pick(q, "questionText", default=""),
+                                    pick(q, "answerText", default="")):
+                continue
             qid, uin = pick(q, "id"), pick(q, "uin", default="")
             if not qid:
                 continue
@@ -750,27 +833,29 @@ def fetch_written_question_items(source):
                 "id": f"{source['name']}|{key}",
                 "source": source["name"],
                 "title": (f"{'Answered' if answered else 'Tabled'}: {heading or 'Written question'}"
-                          f" ({house}, {body})"),
+                          f" ({', '.join(x for x in (house, body) if x)})"),
                 "link": ("https://questions-statements.parliament.uk/written-questions/"
                          f"detail/{tabled}/{uin}" if tabled and uin else ""),
                 "text": text,
                 "date": tabled,
             }
     items = sorted(found.values(), key=lambda i: i["date"], reverse=True)
-    print(f"{source['name']}: {len(items)} items")
+    print(f"{source['name']}: {len(items)} items (of {scanned} checked for keywords)")
     return items
 
 
 def fetch_written_statement_items(source):
     start = since_date(source["days_back"])
-    queries = [(term, lambda t=term: questions_api(
-                    f"/api/writtenstatements/statements?searchTerm={quote(t)}"
-                    f"&madeWhenFrom={start}&expandMember=true&take=50"))
-               for term in PARLIAMENT_KEYWORDS]
-    found = {}
-    for label, data in run_queries(source, queries):
-        for row in result_list(data, "results", "items"):
+    queries = [("statements", lambda: fetch_all_pages(
+        source, f"/api/writtenstatements/statements?madeWhenFrom={start}&expandMember=true"))]
+    found, scanned = {}, 0
+    for label, rows in run_queries(source, queries):
+        scanned += len(rows)
+        for row in rows:
             s = pick(row, "value", default=row)
+            if not mentions_keyword(pick(s, "title", default=""),
+                                    pick(s, "text", default="")):
+                continue
             sid, uin = pick(s, "id"), pick(s, "uin", default="")
             if not sid:
                 continue
@@ -781,14 +866,14 @@ def fetch_written_statement_items(source):
             found[sid] = {
                 "id": f"{source['name']}|{sid}",
                 "source": source["name"],
-                "title": f"{title} ({house}, {body}, {made})",
+                "title": f"{title} ({', '.join(x for x in (house, body, made) if x)})",
                 "link": ("https://questions-statements.parliament.uk/written-statements/"
                          f"detail/{made}/{uin}" if made and uin else ""),
                 "text": clean(pick(s, "text", default=""), 6000),
                 "date": made,
             }
     items = sorted(found.values(), key=lambda i: i["date"], reverse=True)
-    print(f"{source['name']}: {len(items)} items")
+    print(f"{source['name']}: {len(items)} items (of {scanned} checked for keywords)")
     return items
 
 
@@ -811,7 +896,7 @@ def fetch_committee_items(source):
     items, failures = [], []
     for name in source["committees"]:
         try:
-            data = http_json(f"{COMMITTEES_API}/api/Committees?SearchTerm={quote(name)}"
+            data = parliament_json(f"{COMMITTEES_API}/api/Committees?SearchTerm={quote(name)}"
                              f"&CommitteeStatus=Current&Take=20")
             matches = result_list(data, "items", "results")
             exact = [c for c in matches
@@ -824,7 +909,7 @@ def fetch_committee_items(source):
             house = pick(committee, "house", default="")
 
             # New inquiries and other committee work.
-            data = http_json(f"{COMMITTEES_API}/api/CommitteeBusiness?CommitteeId={cid}"
+            data = parliament_json(f"{COMMITTEES_API}/api/CommitteeBusiness?CommitteeId={cid}"
                              f"&DateFrom={start}&SortOrder=DateOpenedNewest&Take=30")
             for b in result_list(data, "items", "results"):
                 bid = pick(b, "id")
@@ -844,7 +929,7 @@ def fetch_committee_items(source):
                 })
 
             # Reports, government responses, calls for evidence, oral evidence.
-            data = http_json(f"{COMMITTEES_API}/api/Publications?CommitteeId={cid}"
+            data = parliament_json(f"{COMMITTEES_API}/api/Publications?CommitteeId={cid}"
                              f"&StartDate={start}&SortOrder=PublicationDateDescending&Take=50")
             for p in result_list(data, "items", "results"):
                 pid = pick(p, "id")
@@ -871,7 +956,7 @@ def fetch_committee_items(source):
                 })
         except Exception as exc:
             failures.append(f"{name}: {exc}")
-            if not isinstance(exc, (urllib.error.HTTPError, ValueError)):
+            if is_unreachable(exc):
                 break  # service unreachable; don't wait on each committee
         time.sleep(0.2)
 
