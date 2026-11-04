@@ -55,7 +55,7 @@ from email.header import decode_header, make_header
 from email.message import EmailMessage
 from html import unescape
 from pathlib import Path
-from urllib.parse import quote, urljoin
+from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import anthropic
 import feedparser
@@ -233,6 +233,16 @@ SOURCES = [
         "id_group": "email-abi",
     },
     {
+        # Google Alerts sent to the bot's inbox: news coverage of public
+        # statements, e.g. ABI responses and positions. Links to the articles
+        # are kept so they appear in alerts.
+        "name": "Google Alerts (news)",
+        "kind": "email",
+        "from": "googlealerts-noreply",
+        "id_group": "email-galerts",
+        "keep_links": True,
+    },
+    {
         "name": "Equity Release Council",
         "kind": "page",
         "pages": ["https://www.equityreleasecouncil.com/information-hub/news/"],
@@ -289,7 +299,9 @@ Reply with ONLY a JSON object, no other text:
   (Commons report stage)", "Work and Pensions Committee report", "Treasury
   Committee call for evidence", "DWP consultation", "TPR press release",
   "Pensions UK press release", "ABI response", "Equity Release Council
-  statement".
+  statement", "News report of an ABI statement".
+  For a news alert email, flag each relevant article separately and use
+  that article's own web address as its link.
 - stage: one of "Early idea / discussion", "Consultation", "Final rules",
   "Legislation", "Coming into force"
 - link: the URL if one is given, otherwise ""
@@ -981,7 +993,25 @@ PARLIAMENT_FETCHERS = {
 
 # ---- Email ------------------------------------------------------------------
 
-def email_body_text(msg, limit):
+def unwrap_link(href):
+    """Google Alerts wrap article links in a google.com redirect."""
+    href = unescape(href)
+    if "google.com/url" in href:
+        query = parse_qs(urlparse(href).query)
+        return (query.get("url") or query.get("q") or [href])[0]
+    return href
+
+
+def html_with_links(html):
+    """Turn <a href="X">Title</a> into "Title (X)" before stripping HTML, so
+    article links survive into the text Claude reads."""
+    html = re.sub(r"<(script|style)\b.*?</\1>", " ", html, flags=re.I | re.S)
+    return ANCHOR_RE.sub(
+        lambda m: f" {clean(m.group(2), 300)} ({unwrap_link(m.group(1))}) "
+        if clean(m.group(2), 300) else " ", html)
+
+
+def email_body_text(msg, limit, keep_links=False):
     plain, html = "", ""
     for part in msg.walk():
         ctype = part.get_content_type()
@@ -995,6 +1025,8 @@ def email_body_text(msg, limit):
             plain = text
         elif ctype == "text/html" and not html:
             html = text
+    if keep_links and html:
+        return clean(html_with_links(html), limit)
     if plain:
         return re.sub(r"\s+", " ", plain).strip()[:limit]
     return clean(html, limit)
@@ -1029,7 +1061,8 @@ def fetch_email_items(sources):
                     "source": source["name"],
                     "title": subject,
                     "link": "",
-                    "text": email_body_text(msg, 15000),
+                    "text": email_body_text(msg, 15000,
+                                            source.get("keep_links", False)),
                 })
                 count += 1
             print(f"{source['name']}: {count} items")
