@@ -222,6 +222,51 @@ SOURCES = [
         "kind": "page",
         "pages": ["https://www.pensionsuk.org.uk/News"],
         "link_pattern": r"pensionsuk\.org\.uk/News/Article/[^/?#]+$",
+        "follow_pdf": True,  # also read any policy document the article links
+    },
+    {
+        # Pensions UK's consultation responses, research and reports. Each
+        # entry links to the PDF document, which the bot also reads.
+        "name": "Pensions UK policy documents",
+        "kind": "page",
+        "pages": ["https://www.pensionsuk.org.uk/Policy-and-Research/Document-library"],
+        "link_pattern": r"pensionsuk\.org\.uk/Policy-and-Research/Document-library/[^/?#]+$",
+        "follow_pdf": True,
+    },
+    {
+        # Society of Pension Professionals: consultations and formal
+        # responses. The listing links straight to the PDF responses.
+        "name": "Society of Pension Professionals",
+        "kind": "page",
+        "pages": ["https://the-spp.co.uk/document-category/consultations/"],
+        "link_pattern": r"the-spp\.co\.uk/wp-content/uploads/[^?#]+\.pdf$",
+        "strip_query": True,  # the site adds a random ?v=... to each link
+    },
+    {
+        # Pension Protection Fund press releases (levy decisions,
+        # consultations, valuation assumptions).
+        "name": "Pension Protection Fund",
+        "kind": "page",
+        "pages": ["https://www.ppf.co.uk/press-releases"],
+        "link_pattern": r"ppf\.co\.uk/press-releases/[A-Za-z0-9-]+/?$",
+    },
+    {
+        # PPF consultation documents (PDFs), e.g. s143/s179 valuation
+        # assumptions, which reflect bulk annuity pricing.
+        "name": "Pension Protection Fund consultations",
+        "kind": "page",
+        "pages": ["https://www.ppf.co.uk/trustees-advisers/valuation-guidance/new-consultation-documents"],
+        "link_pattern": r"(?i)ppf\.co\.uk/-/media/[^?#]*consultation[^?#]*\.pdf$",
+        "strip_query": True,
+    },
+    {
+        # Financial Reporting Council, actuarial topic only: actuarial
+        # standards (e.g. TAS 300 Pensions), AS TM1 and pension illustrations.
+        "name": "Financial Reporting Council (actuarial)",
+        "kind": "page",
+        "pages": ["https://www.frc.org.uk/library/?topics=actuarial"],
+        "link_pattern": (r"frc\.org\.uk/(consultations|news-and-events/news/\d{4}/\d{2}"
+                         r"|library/[a-z0-9-]+/[a-z0-9-]+)/[a-z0-9-]+/?$"),
     },
     {
         # The ABI's website blocks automated visitors, so the bot reads ABI
@@ -298,8 +343,10 @@ Reply with ONLY a JSON object, no other text:
   "House of Lords written answer", "Westminster Hall debate", "Public bill
   (Commons report stage)", "Work and Pensions Committee report", "Treasury
   Committee call for evidence", "DWP consultation", "TPR press release",
-  "Pensions UK press release", "ABI response", "Equity Release Council
-  statement", "News report of an ABI statement".
+  "Pensions UK press release", "Pensions UK consultation response", "SPP
+  consultation response", "PPF consultation", "FRC consultation on actuarial
+  standards", "ABI response", "Equity Release Council statement", "News
+  report of an ABI statement".
   For a news alert email, flag each relevant article separately and use
   that article's own web address as its link.
 - stage: one of "Early idea / discussion", "Consultation", "Final rules",
@@ -381,9 +428,16 @@ statutory instruments or commencement dates):
   * investment requirements or incentives for pension schemes and insurers
     (e.g. Mansion House commitments), and how the Consumer Duty applies to
     retirement products
-- Reports a trade association (e.g. Pensions UK, ABI, Equity Release
-  Council) setting out a position on, responding to, or calling for one of
-  the changes above.
+  * the Pension Protection Fund: levy, compensation, and its s143/s179
+    valuation assumptions (which reflect bulk annuity pricing)
+  * actuarial standards and pension illustrations set by the Financial
+    Reporting Council (e.g. TAS 300, AS TM1, illustrations for guided
+    retirement and decumulation)
+- Is a trade association or industry body (e.g. Pensions UK, ABI, Society
+  of Pension Professionals, Equity Release Council) setting out a position
+  on, responding to a consultation on, or calling for one of the changes
+  above. For a consultation response, say which consultation it responds
+  to and the body's main point.
 - Is select committee work on any of the topics above: a new inquiry, call
   for evidence, report, government response, or an oral evidence session
   with ministers, regulators or industry.
@@ -445,8 +499,9 @@ WATCHES = [
             "sector were found today across Hansard, written questions and "
             "statements, select committees, Parliament bills, the "
             "FCA, the Bank of England / PRA, HM Treasury, DWP, the Pensions "
-            "Regulator, Pensions UK, the ABI, the Equity Release Council or "
-            "new UK legislation."
+            "Regulator, the Pension Protection Fund, the Financial Reporting "
+            "Council, Pensions UK, the Society of Pension Professionals, the "
+            "ABI, the Equity Release Council or new UK legislation."
         ),
     },
 ]
@@ -582,11 +637,13 @@ ANCHOR_RE = re.compile(r"<a\b[^>]*?href\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>
                        re.I | re.S)
 
 
-def extract_links(html, base_url, pattern):
+def extract_links(html, base_url, pattern, strip_query=False):
     """Return {url: title} for links on a page matching pattern."""
     found = {}
     for match in ANCHOR_RE.finditer(html):
         url = urljoin(base_url, unescape(match.group(1).strip())).split("#")[0]
+        if strip_query:
+            url = url.split("?")[0]
         if not re.search(pattern, url):
             continue
         title = clean(match.group(2), 300)
@@ -605,7 +662,8 @@ def fetch_page_items(source):
     for page in source["pages"]:
         url = page.format(year=year, prev_year=year - 1)
         try:
-            links = extract_links(http_get(url), url, source["link_pattern"])
+            links = extract_links(http_get(url), url, source["link_pattern"],
+                                  source.get("strip_query", False))
             for link, title in links.items():
                 if len(title) > len(found.get(link, "")):
                     found[link] = title
@@ -628,19 +686,60 @@ def fetch_page_items(source):
             "link": link,
             "text": "",
             "needs_article": True,
+            "follow_pdf": source.get("follow_pdf", False),
         })
     print(f"{source['name']}: {len(items)} items")
     return items
 
 
-def fetch_article_text(url, title, limit=5000):
-    """Read the main text of an article page (used for page sources)."""
-    html = http_get(url)
+def http_get_bytes(url):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=PARLIAMENT_TIMEOUT) as resp:
+        return resp.read(), resp.headers.get_content_type()
+
+
+def pdf_text(data, limit, max_pages=10):
+    """Text of the first pages of a PDF document."""
+    from io import BytesIO
+    from pypdf import PdfReader
+    reader = PdfReader(BytesIO(data))
+    parts = []
+    for page in reader.pages[:max_pages]:
+        parts.append(page.extract_text() or "")
+        if sum(len(p) for p in parts) > limit:
+            break
+    return re.sub(r"\s+", " ", " ".join(parts)).strip()[:limit]
+
+
+def html_main_text(html, title, limit):
     html = re.sub(r"<(script|style|nav|header|footer|aside|form|noscript)\b.*?</\1>",
                   " ", html, flags=re.I | re.S)
     text = clean(html, 200000)
     start = text.find(title[:60]) if title else -1
     return text[start:start + limit] if start >= 0 else text[:limit]
+
+
+def fetch_article_text(url, title, limit=5000, follow_pdf=False):
+    """Read the text of an article page or PDF document. With follow_pdf, the
+    first PDF the page links to (e.g. the full consultation response) is
+    read as well."""
+    data, ctype = http_get_bytes(url)
+    if ctype == "application/pdf" or data[:5] == b"%PDF-":
+        return "[PDF document] " + pdf_text(data, limit + 3000)
+
+    html = data.decode("utf-8", "replace")
+    text = html_main_text(html, title, limit)
+    if follow_pdf:
+        pdfs = [urljoin(url, unescape(m.group(1))) for m in ANCHOR_RE.finditer(html)
+                if ".pdf" in m.group(1).lower()]
+        if pdfs:
+            try:
+                pdf_data, _ = http_get_bytes(pdfs[0])
+                text += (f"\n\n[Linked PDF document: {pdfs[0].split('?')[0]}] "
+                         + pdf_text(pdf_data, 6000))
+            except Exception as exc:
+                print(f"WARNING: could not read PDF {pdfs[0]}: {exc}")
+    return text
 
 
 # ---- Parliament -------------------------------------------------------------
@@ -1248,7 +1347,9 @@ def main():
     for item in {i["id"]: i for lst in to_check.values() for i in lst}.values():
         if item.get("needs_article") and not item["text"] and item["link"]:
             try:
-                item["text"] = fetch_article_text(item["link"], item["title"])
+                item["text"] = fetch_article_text(
+                    item["link"], item["title"],
+                    follow_pdf=item.get("follow_pdf", False))
             except Exception as exc:
                 print(f"WARNING: could not open {item['link']}: {exc}")
 
