@@ -515,5 +515,11 @@
 "just::email|<010101a1b1992673-6efe9923-9171-4d9e-879e-801b663f65e9-000000@us-west-2.messagingfabric.com>": "2026-11-07T07:55:01.922607+00:00",
 "just::email|<010101a1b1d0637d-0d4403c3-7680-4ce3-b9f0-75202b45914a-000000@us-west-2.messagingfabric.com>": "2026-11-07T07:55:06.356676+00:00",
 "just::DWP publications|tag:www.gov.uk,2005:/guidance/universal-credit-if-youre-a-mixed-age-couple-and-get-migration-notice-letters": "2026-11-09T08:20:58.957037+00:00",
-"just::DWP publications|tag:www.gov.uk,2005:/guidance/universal-credit-if-youre-state-pension-age-and-get-a-migration-notice-letter": "2026-11-09T08:20:59.948088+00:00"
+"just::DWP publications|tag:www.gov.uk,2005:/guidance/universal-credit-if-youre-state-pension-age-and-get-a-migration-notice-letter": "2026-11-09T08:20:59.948088+00:00",
+"HM Treasury publications|tag:www.gov.uk,2005:/government/publications/trade-specialised-committee-on-goods": "2026-11-10T08:07:41.667742+00:00",
+"email|<010101a1c10b6303-9ce417e7-4ed4-4eae-9e80-0bc525023f2d-000000@us-west-2.messagingfabric.com>": "2026-11-10T08:07:43.235394+00:00",
+"just::HM Treasury publications|tag:www.gov.uk,2005:/government/publications/trade-specialised-committee-on-goods": "2026-11-10T08:07:46.010739+00:00",
+"just::Parliament public bills|https://bills.parliament.uk/bills/4201": "2026-11-10T08:07:47.508716+00:00",
+"just::Equity Release Council|https://www.equityreleasecouncil.com/news/equity-release-council-launches-leadership-symposium/": "2026-11-10T08:07:49.628400+00:00",
+"just::email|<010101a1c10b6303-9ce417e7-4ed4-4eae-9e80-0bc525023f2d-000000@us-west-2.messagingfabric.com>": "2026-11-10T08:07:50.693685+00:00"
 }
